@@ -1,168 +1,87 @@
-import express from 'express';
-import multer from 'multer';
-import cors from 'cors';
-import { PDFDocument } from 'pdf-lib';
-import { createCanvas, loadImage } from 'canvas';
-import fs from 'fs';
-import path from 'path';
+import express from "express";
+import multer from "multer";
+import cors from "cors";
+import { PDFDocument } from "pdf-lib";
+import sharp from "sharp";
+import fs from "fs/promises";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const upload = multer({ storage: multer.memoryStorage() });
 
-// ✅ Allow CORS for all domains (so your test.html can call it)
-app.use(cors());
+// ✅ Enable CORS for ALL origins
+app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 
-// ✅ Temporary storage for uploads
-const upload = multer({ dest: 'uploads/' });
-
-// ✅ Simple health check
-app.get('/', (req, res) => {
-  res.send('✅ Gang Sheet Backend is running!');
+// Simple test route
+app.get("/", (req, res) => {
+  res.send("✅ Gang Sheet backend is running with full CORS!");
 });
 
-// ✅ Merge endpoint
-app.post('/merge', upload.single('file'), async (req, res) => {
+// Main merge route
+app.post("/merge", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const { quantity, rotate } = req.body;
+    const qty = parseInt(quantity) || 1;
+    const shouldRotate = rotate === "true";
 
-    const rotate = req.body.rotate === 'true';
-    const qty = parseInt(req.body.qty || '1', 10);
+    const gangWidth = 22 * 72;  // 22 inches
+    const gangHeight = 36 * 72; // 36 inches
 
-    const ext = path.extname(req.file.originalname).toLowerCase();
-    const gangSheetWidth = 22; // inches
-    const gangSheetHeight = 36; // inches
-    const dpi = 300;
-    const sheetPxWidth = gangSheetWidth * dpi;
-    const sheetPxHeight = gangSheetHeight * dpi;
+    const gangPdf = await PDFDocument.create();
+    const gangPage = gangPdf.addPage([gangWidth, gangHeight]);
 
-    let imageWidthInches, imageHeightInches;
+    const fileBuffer = req.file.buffer;
+    const fileType = req.file.originalname.toLowerCase();
 
-    if (ext === '.png') {
-      // ✅ Handle PNG
-      const img = await loadImage(req.file.path);
+    let imagePdf;
 
-      let imgWidth = img.width;
-      let imgHeight = img.height;
-
-      if (rotate) [imgWidth, imgHeight] = [imgHeight, imgWidth];
-
-      imageWidthInches = imgWidth / dpi;
-      imageHeightInches = imgHeight / dpi;
-
-      const across = Math.floor(gangSheetWidth / imageWidthInches);
-      const down = Math.ceil(qty / across);
-
-      const totalHeightNeeded = down * imageHeightInches;
-      const gangSheetPages = Math.ceil(totalHeightNeeded / gangSheetHeight);
-
-      const pdfDoc = await PDFDocument.create();
-
-      let remainingQty = qty;
-      for (let pageIndex = 0; pageIndex < gangSheetPages; pageIndex++) {
-        const page = pdfDoc.addPage([sheetPxWidth, sheetPxHeight]);
-        const canvas = createCanvas(sheetPxWidth, sheetPxHeight);
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, sheetPxWidth, sheetPxHeight);
-
-        let placedOnThisPage = 0;
-
-        for (let row = 0; row < Math.floor(sheetPxHeight / (imgHeight)); row++) {
-          for (let col = 0; col < Math.floor(sheetPxWidth / (imgWidth)); col++) {
-            if (remainingQty <= 0) break;
-
-            const x = col * imgWidth;
-            const y = row * imgHeight;
-
-            ctx.save();
-            if (rotate) {
-              ctx.translate(x + imgHeight / 2, y + imgWidth / 2);
-              ctx.rotate(-Math.PI / 2);
-              ctx.drawImage(img, -imgWidth / 2, -imgHeight / 2);
-            } else {
-              ctx.drawImage(img, x, y);
-            }
-            ctx.restore();
-
-            remainingQty--;
-            placedOnThisPage++;
-          }
-          if (remainingQty <= 0) break;
-        }
-
-        const pngBuffer = canvas.toBuffer('image/png');
-        const embeddedPng = await pdfDoc.embedPng(pngBuffer);
-        const { width, height } = embeddedPng.scale(1);
-
-        page.drawImage(embeddedPng, {
-          x: 0,
-          y: 0,
-          width,
-          height
-        });
-      }
-
-      const pdfBytes = await pdfDoc.save();
-      fs.unlinkSync(req.file.path); // cleanup
-
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename="gangsheet.pdf"');
-      return res.send(Buffer.from(pdfBytes));
-    } else if (ext === '.pdf') {
-      // ✅ Handle PDF (place PDF pages on gangsheet)
-      const existingPdfBytes = fs.readFileSync(req.file.path);
-      const pdfDoc = await PDFDocument.load(existingPdfBytes);
-      const gangSheetDoc = await PDFDocument.create();
-
-      const pdfPage = await gangSheetDoc.embedPage(pdfDoc.getPage(0));
-      const { width: origW, height: origH } = pdfPage;
-
-      let w = origW;
-      let h = origH;
-      if (rotate) [w, h] = [h, w];
-
-      const across = Math.floor((gangSheetWidth * dpi) / w);
-      const down = Math.ceil(qty / across);
-
-      const totalHeightNeeded = down * h;
-      const gangSheetPages = Math.ceil(totalHeightNeeded / (gangSheetHeight * dpi));
-
-      let remainingQty = qty;
-      for (let p = 0; p < gangSheetPages; p++) {
-        const page = gangSheetDoc.addPage([gangSheetWidth * dpi, gangSheetHeight * dpi]);
-
-        for (let row = 0; row < Math.floor((gangSheetHeight * dpi) / h); row++) {
-          for (let col = 0; col < across; col++) {
-            if (remainingQty <= 0) break;
-
-            page.drawPage(pdfPage, {
-              x: col * w,
-              y: (gangSheetHeight * dpi) - (row + 1) * h,
-              width: w,
-              height: h
-            });
-
-            remainingQty--;
-          }
-          if (remainingQty <= 0) break;
-        }
-      }
-
-      const pdfBytes = await gangSheetDoc.save();
-      fs.unlinkSync(req.file.path);
-
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename="gangsheet.pdf"');
-      return res.send(Buffer.from(pdfBytes));
+    if (fileType.endsWith(".png")) {
+      const pngBuffer = await sharp(fileBuffer).toFormat("png").toBuffer();
+      imagePdf = await PDFDocument.create();
+      const pngImage = await imagePdf.embedPng(pngBuffer);
+      const pngDims = pngImage.scale(1);
+      const page = imagePdf.addPage([pngDims.width, pngDims.height]);
+      page.drawImage(pngImage, { x: 0, y: 0, width: pngDims.width, height: pngDims.height });
+    } else if (fileType.endsWith(".pdf")) {
+      imagePdf = await PDFDocument.load(fileBuffer);
     } else {
-      return res.status(400).json({ error: 'Unsupported file type. Use PNG or PDF.' });
+      return res.status(400).json({ error: "Unsupported file type" });
     }
+
+    const embeddedPages = await gangPdf.embedPdf(await imagePdf.save());
+    const embeddedPage = embeddedPages[0];
+    const { width, height } = embeddedPage;
+
+    const finalWidth = shouldRotate ? height : width;
+    const finalHeight = shouldRotate ? width : height;
+
+    const cols = Math.floor(gangWidth / finalWidth);
+    const rows = Math.ceil(qty / cols);
+
+    let placed = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (placed >= qty) break;
+        let x = c * finalWidth;
+        let y = gangHeight - (r + 1) * finalHeight;
+        gangPage.drawPage(embeddedPage, {
+          x,
+          y,
+          rotate: shouldRotate ? { type: "degrees", angle: 90 } : undefined,
+        });
+        placed++;
+      }
+    }
+
+    const pdfBytes = await gangPdf.save();
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "attachment; filename=gangsheet.pdf");
+    res.send(Buffer.from(pdfBytes));
+
   } catch (err) {
-    console.error('Merge error:', err);
-    res.status(500).json({ error: 'Error merging file' });
+    console.error(err);
+    res.status(500).json({ error: "Error merging file" });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Gang Sheet backend running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
