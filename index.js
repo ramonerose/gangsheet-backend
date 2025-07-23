@@ -1,4 +1,3 @@
-
 import express from "express";
 import multer from "multer";
 import { PDFDocument, degrees } from "pdf-lib";
@@ -12,10 +11,9 @@ const SHEET_HEIGHT_INCH = 36;
 const SAFE_MARGIN_INCH = 0.125;
 const SPACING_INCH = 0.5;
 const POINTS_PER_INCH = 72;
-const PNG_DPI = 300; // Assume PNGs are 300 DPI
 
 app.get("/", (req, res) => {
-  res.send("✅ Gang Sheet backend (Fixed PNG scaling) is running!");
+  res.send("✅ Gang Sheet backend (original Replit version) is running!");
 });
 
 app.post("/merge", upload.single("file"), async (req, res) => {
@@ -36,23 +34,15 @@ app.post("/merge", upload.single("file"), async (req, res) => {
     let isPDF = false;
 
     if (filename.endsWith(".pdf")) {
-      // ✅ Handle PDF correctly
       const srcDoc = await PDFDocument.load(uploadedFile);
       [embeddedObj] = await gangDoc.embedPdf(await srcDoc.save());
       originalWidthPts = embeddedObj.width;
       originalHeightPts = embeddedObj.height;
       isPDF = true;
     } else if (filename.endsWith(".png")) {
-      // ✅ Handle PNG correctly with DPI conversion
       const embeddedPng = await gangDoc.embedPng(uploadedFile);
-      const pxWidth = embeddedPng.width;
-      const pxHeight = embeddedPng.height;
-
-      // Convert pixels → inches → points
-      const inchesWidth = pxWidth / PNG_DPI;
-      const inchesHeight = pxHeight / PNG_DPI;
-      originalWidthPts = inchesWidth * POINTS_PER_INCH;
-      originalHeightPts = inchesHeight * POINTS_PER_INCH;
+      originalWidthPts = embeddedPng.width;   // <-- this is the scaling bug
+      originalHeightPts = embeddedPng.height;
       embeddedObj = embeddedPng;
     } else {
       throw new Error("Unsupported file type. Upload PDF or PNG.");
