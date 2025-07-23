@@ -1,119 +1,81 @@
 import express from 'express';
-import multer from 'multer';
 import cors from 'cors';
+import multer from 'multer';
+import { PDFDocument } from 'pdf-lib';
+import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
-import sharp from 'sharp';
-import { PDFDocument, rgb } from 'pdf-lib';
-import { createCanvas, loadImage } from 'canvas';
 
 const app = express();
-app.use(cors());
-
-// Temporary upload storage
 const upload = multer({ dest: 'uploads/' });
 
-// Test endpoint to confirm server is live
-app.get('/ping', (req, res) => {
-  res.json({ message: "✅ Backend is live and responding!" });
+app.use(cors());
+app.use(express.json());
+
+// Simple test route
+app.get('/', (req, res) => {
+  res.send('✅ Gang Sheet backend is running!');
 });
 
-// Main gang sheet merging endpoint
+// Merge endpoint
 app.post('/merge', upload.single('file'), async (req, res) => {
   try {
+    const quantity = parseInt(req.body.quantity) || 1;
+    const rotate = req.body.rotate === 'true';
+
     const filePath = req.file.path;
-    const { quantity, rotate } = req.body;
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
 
-    const gangSheetWidth = 22; // inches
-    const dpi = 300; 
-    const pxPerInch = dpi;
+    // Create a new blank PDF
+    const pdfDoc = await PDFDocument.create();
 
-    let imageBuffer;
+    // If input is a PDF
+    if (fileExt === '.pdf') {
+      const fileBytes = fs.readFileSync(filePath);
+      const inputPdf = await PDFDocument.load(fileBytes);
 
-    if (req.file.mimetype === 'application/pdf') {
-      // Extract first page of PDF as image
-      const pdfBytes = fs.readFileSync(filePath);
-      const pdfDoc = await PDFDocument.load(pdfBytes);
-      const page = pdfDoc.getPage(0);
-      const { width, height } = page.getSize();
+      const [page] = await pdfDoc.copyPages(inputPdf, [0]);
+      for (let i = 0; i < quantity; i++) {
+        const newPage = pdfDoc.addPage([page.getWidth(), page.getHeight()]);
+        newPage.drawPage(page);
+      }
 
-      // Create a blank canvas for the extracted page
-      const canvas = createCanvas(width, height);
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = 'white';
-      ctx.fillRect(0, 0, width, height);
-
-      imageBuffer = canvas.toBuffer('image/png');
     } else {
-      imageBuffer = fs.readFileSync(filePath);
-    }
+      // Assume it's an image (PNG, JPG)
+      const imgBuffer = fs.readFileSync(filePath);
 
-    // Load the image and get dimensions
-    let img = sharp(imageBuffer);
-    if (rotate === 'true' || rotate === 'yes') {
-      img = img.rotate(90);
-    }
-    const metadata = await img.metadata();
-    const imgWidthPx = metadata.width;
-    const imgHeightPx = metadata.height;
+      // Optionally rotate the image
+      const processedImg = rotate
+        ? await sharp(imgBuffer).rotate(90).toBuffer()
+        : imgBuffer;
 
-    const imagesPerRow = Math.floor((gangSheetWidth * pxPerInch) / imgWidthPx);
-    const rowsNeeded = Math.ceil(quantity / imagesPerRow);
+      // Embed into PDF
+      const img = await pdfDoc.embedPng(processedImg);
+      const { width, height } = img;
 
-    const gangSheetHeightPx = rowsNeeded * imgHeightPx;
-
-    // Create blank gang sheet
-    const gangCanvas = createCanvas(
-      gangSheetWidth * pxPerInch,
-      gangSheetHeightPx
-    );
-    const ctx = gangCanvas.getContext('2d');
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, gangCanvas.width, gangCanvas.height);
-
-    const loadedImage = await loadImage(await img.png().toBuffer());
-    let x = 0, y = 0, placed = 0;
-
-    for (let i = 0; i < quantity; i++) {
-      ctx.drawImage(loadedImage, x, y, imgWidthPx, imgHeightPx);
-      placed++;
-      if (placed % imagesPerRow === 0) {
-        x = 0;
-        y += imgHeightPx;
-      } else {
-        x += imgWidthPx;
+      for (let i = 0; i < quantity; i++) {
+        const page = pdfDoc.addPage([width, height]);
+        page.drawImage(img, { x: 0, y: 0, width, height });
       }
     }
 
-    const outPdf = await PDFDocument.create();
-    const pngImage = await outPdf.embedPng(gangCanvas.toBuffer());
-    const pdfPage = outPdf.addPage([
-      gangCanvas.width,
-      gangCanvas.height
-    ]);
-    pdfPage.drawImage(pngImage, {
-      x: 0,
-      y: 0,
-      width: gangCanvas.width,
-      height: gangCanvas.height,
-    });
+    const mergedPdfBytes = await pdfDoc.save();
 
-    const pdfBytesOut = await outPdf.save();
+    // Clean up uploaded file
+    fs.unlinkSync(filePath);
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="gangsheet.pdf"');
-    res.send(Buffer.from(pdfBytesOut));
-
-    fs.unlinkSync(filePath); // cleanup
+    res.setHeader('Content-Disposition', 'attachment; filename=gangsheet.pdf');
+    res.send(Buffer.from(mergedPdfBytes));
 
   } catch (error) {
-    console.error('❌ Error merging gang sheet:', error);
-    res.status(500).json({ error: 'Failed to generate gang sheet' });
+    console.error('❌ Error merging file:', error);
+    res.status(500).send('Error generating gang sheet');
   }
 });
 
-// ✅ IMPORTANT: Railway requires binding to process.env.PORT
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Gang Sheet backend running on port ${PORT}`);
+// ✅ Use Railway's dynamic port
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
