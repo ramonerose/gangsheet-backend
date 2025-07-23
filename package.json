@@ -1,7 +1,7 @@
-
 {
-  "name": "gangsheet-backend",
+  "name": "dtf-gangsheet-generator",
   "version": "1.0.0",
+  "description": "DTF gang sheet generator backend",
   "main": "index.js",
   "type": "module",
   "scripts": {
