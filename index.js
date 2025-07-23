@@ -9,24 +9,16 @@ import sharp from 'sharp';
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// ✅ Allow frontend access
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ Multer for file uploads
 const upload = multer({ dest: 'uploads/' });
 
-// ✅ DPI constant for scaling (most print workflows use 300 DPI)
-const PRINT_DPI = 300;
+// ✅ Set desired PRINT WIDTH in inches
+const FIXED_WIDTH_INCHES = 6.5;
+const POINTS_PER_INCH = 72;
 
-// ✅ Utility: Scale pixels → inches → PDF points
-function pxToPDFPoints(px) {
-  const inches = px / PRINT_DPI; // convert to inches
-  return inches * 72; // convert to PDF points
-}
-
-// ✅ Merge Route
 app.post('/merge', upload.single('file'), async (req, res) => {
   try {
     const { quantity, rotate } = req.body;
@@ -38,25 +30,31 @@ app.post('/merge', upload.single('file'), async (req, res) => {
     let singleImagePDF;
 
     if (ext === '.png') {
-      console.log('✅ Processing PNG with DPI scaling...');
+      console.log('✅ Processing PNG with FIXED size...');
+
+      // Read PNG dimensions
       const metadata = await sharp(filePath).metadata();
-      console.log(`✅ PNG metadata: ${metadata.width}x${metadata.height}px`);
+      const originalWidth = metadata.width;
+      const originalHeight = metadata.height;
+      console.log(`Original PNG size: ${originalWidth}px x ${originalHeight}px`);
 
-      const widthPDF = pxToPDFPoints(metadata.width);
-      const heightPDF = pxToPDFPoints(metadata.height);
+      // ✅ Force fixed width in inches → convert to points
+      const fixedWidthPoints = FIXED_WIDTH_INCHES * POINTS_PER_INCH;
+      const aspectRatio = originalHeight / originalWidth;
+      const fixedHeightPoints = fixedWidthPoints * aspectRatio;
 
-      console.log(`✅ Target print size: ${(metadata.width / PRINT_DPI).toFixed(2)}" x ${(metadata.height / PRINT_DPI).toFixed(2)}"`);
+      console.log(`✅ Forcing to ${FIXED_WIDTH_INCHES}" wide → ${fixedWidthPoints}pt wide x ${fixedHeightPoints.toFixed(2)}pt high`);
 
       const pngBuffer = fs.readFileSync(filePath);
       const tempDoc = await PDFDocument.create();
       const embeddedImage = await tempDoc.embedPng(pngBuffer);
 
-      const page = tempDoc.addPage([widthPDF, heightPDF]);
+      const page = tempDoc.addPage([fixedWidthPoints, fixedHeightPoints]);
       page.drawImage(embeddedImage, {
         x: 0,
         y: 0,
-        width: widthPDF,
-        height: heightPDF,
+        width: fixedWidthPoints,
+        height: fixedHeightPoints
       });
 
       singleImagePDF = await tempDoc.save();
@@ -69,7 +67,7 @@ app.post('/merge', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Only PNG and PDF are supported.' });
     }
 
-    // ✅ Create gang sheet document
+    // ✅ Create gang sheet
     const gangSheetDoc = await PDFDocument.create();
     const embeddedSource = await gangSheetDoc.embedPdf(singleImagePDF);
 
@@ -78,7 +76,6 @@ app.post('/merge', upload.single('file'), async (req, res) => {
 
     const margin = 10;
     const gap = 10;
-
     const maxWidth = 3300;  // ~11 inches
     const maxHeight = 5100; // ~17 inches
 
@@ -112,10 +109,9 @@ app.post('/merge', upload.single('file'), async (req, res) => {
 
     const finalPDF = await gangSheetDoc.save();
 
-    // ✅ Cleanup temp file
     fs.unlinkSync(filePath);
 
-    console.log('✅ Gang sheet generated successfully!');
+    console.log('✅ Gang sheet generated successfully with FIXED WIDTH!');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'attachment; filename=gangsheet.pdf');
     res.send(Buffer.from(finalPDF));
@@ -126,10 +122,8 @@ app.post('/merge', upload.single('file'), async (req, res) => {
   }
 });
 
-// ✅ Root route to confirm backend is live
 app.get('/', (req, res) => {
-  res.send('✅ Gang Sheet backend is running with DPI scaling!');
+  res.send('✅ Gang Sheet backend running with HARD-LOCKED image sizing!');
 });
 
-// ✅ Start server
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
