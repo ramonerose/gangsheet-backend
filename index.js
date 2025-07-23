@@ -1,81 +1,156 @@
-import express from 'express';
-import cors from 'cors';
-import multer from 'multer';
-import { PDFDocument } from 'pdf-lib';
-import sharp from 'sharp';
-import fs from 'fs';
-import path from 'path';
+import express from "express";
+import multer from "multer";
+import cors from "cors";
+import sharp from "sharp";
+import { PDFDocument, StandardFonts } from "pdf-lib";
+import fs from "fs";
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const port = process.env.PORT || 8080;
 
 app.use(cors());
 app.use(express.json());
 
-// Simple test route
-app.get('/', (req, res) => {
-  res.send('✅ Gang Sheet backend is running!');
-});
+// Multer for file uploads (memory storage)
+const upload = multer({ storage: multer.memoryStorage() });
 
-// Merge endpoint
-app.post('/merge', upload.single('file'), async (req, res) => {
+// ==== CONFIG ====
+const SHEET_WIDTH_IN = 22; // gang sheet width in inches
+const SHEET_HEIGHT_IN = 24; // gang sheet height in inches
+const DPI = 300; // print resolution
+const MARGIN_IN = 0.5; // margin around sheet
+const GAP_IN = 0.25; // spacing between logos
+
+// === HELPER to convert inches → PDF points ===
+const inchToPoints = (inch) => inch * 72; // PDF-lib uses points (72 pt/inch)
+
+// === MAIN MERGE ROUTE ===
+app.post("/merge", upload.single("file"), async (req, res) => {
   try {
-    const quantity = parseInt(req.body.quantity) || 1;
-    const rotate = req.body.rotate === 'true';
+    const { quantity, rotate } = req.body;
+    const rotate90 = rotate === "true" || rotate === true;
+    const fileBuffer = req.file.buffer;
+    const mimeType = req.file.mimetype;
+    const totalQty = parseInt(quantity) || 1;
 
-    const filePath = req.file.path;
-    const fileExt = path.extname(req.file.originalname).toLowerCase();
+    // === Create a blank PDF gang sheet ===
+    const doc = await PDFDocument.create();
 
-    // Create a new blank PDF
-    const pdfDoc = await PDFDocument.create();
+    // Convert sheet size to points for PDF
+    const sheetWidthPts = inchToPoints(SHEET_WIDTH_IN);
+    const sheetHeightPts = inchToPoints(SHEET_HEIGHT_IN);
 
-    // If input is a PDF
-    if (fileExt === '.pdf') {
-      const fileBytes = fs.readFileSync(filePath);
-      const inputPdf = await PDFDocument.load(fileBytes);
+    // Determine image width/height in inches
+    let logoWidthIn = 0;
+    let logoHeightIn = 0;
 
-      const [page] = await pdfDoc.copyPages(inputPdf, [0]);
-      for (let i = 0; i < quantity; i++) {
-        const newPage = pdfDoc.addPage([page.getWidth(), page.getHeight()]);
-        newPage.drawPage(page);
-      }
+    if (mimeType === "image/png") {
+      const meta = await sharp(fileBuffer).metadata();
+      // Convert pixels → inches at 300 dpi
+      logoWidthIn = meta.width / DPI;
+      logoHeightIn = meta.height / DPI;
+    } else if (mimeType === "application/pdf") {
+      const uploadedPDF = await PDFDocument.load(fileBuffer);
+      const [firstPage] = uploadedPDF.getPages();
+      const { width, height } = firstPage.getSize();
+      // width/height are already in points → convert to inches
+      logoWidthIn = width / 72;
+      logoHeightIn = height / 72;
+    }
 
-    } else {
-      // Assume it's an image (PNG, JPG)
-      const imgBuffer = fs.readFileSync(filePath);
+    // If rotation requested, swap width/height
+    if (rotate90) {
+      const tmp = logoWidthIn;
+      logoWidthIn = logoHeightIn;
+      logoHeightIn = tmp;
+    }
 
-      // Optionally rotate the image
-      const processedImg = rotate
-        ? await sharp(imgBuffer).rotate(90).toBuffer()
-        : imgBuffer;
+    // Placement math
+    const usableWidthIn = SHEET_WIDTH_IN - MARGIN_IN * 2;
+    const usableHeightIn = SHEET_HEIGHT_IN - MARGIN_IN * 2;
 
-      // Embed into PDF
-      const img = await pdfDoc.embedPng(processedImg);
-      const { width, height } = img;
+    const logosPerRow = Math.floor(
+      (usableWidthIn + GAP_IN) / (logoWidthIn + GAP_IN)
+    );
+    const rowsPerSheet = Math.floor(
+      (usableHeightIn + GAP_IN) / (logoHeightIn + GAP_IN)
+    );
 
-      for (let i = 0; i < quantity; i++) {
-        const page = pdfDoc.addPage([width, height]);
-        page.drawImage(img, { x: 0, y: 0, width, height });
+    const logosPerSheet = logosPerRow * rowsPerSheet;
+
+    // Calculate how many sheets needed
+    const totalSheets = Math.ceil(totalQty / logosPerSheet);
+
+    // Now generate each sheet
+    for (let s = 0; s < totalSheets; s++) {
+      const page = doc.addPage([sheetWidthPts, sheetHeightPts]);
+
+      let placedCount = 0;
+      let xIn = MARGIN_IN;
+      let yIn = SHEET_HEIGHT_IN - MARGIN_IN - logoHeightIn; // start from top
+
+      for (let r = 0; r < rowsPerSheet; r++) {
+        xIn = MARGIN_IN; // reset x each row
+
+        for (let c = 0; c < logosPerRow; c++) {
+          const currentLogoIndex = s * logosPerSheet + placedCount;
+          if (currentLogoIndex >= totalQty) break;
+
+          // Draw image or PDF page
+          if (mimeType === "image/png") {
+            const pngImage = await doc.embedPng(fileBuffer);
+            const drawWidthPts = inchToPoints(logoWidthIn);
+            const drawHeightPts = inchToPoints(logoHeightIn);
+
+            page.drawImage(pngImage, {
+              x: inchToPoints(xIn),
+              y: inchToPoints(yIn),
+              width: drawWidthPts,
+              height: drawHeightPts,
+              rotate: rotate90 ? { degrees: 90 } : undefined,
+            });
+          } else if (mimeType === "application/pdf") {
+            const uploadedPDF = await PDFDocument.load(fileBuffer);
+            const [firstPage] = await doc.copyPages(uploadedPDF, [0]);
+            const pdfPageEmbed = firstPage;
+
+            page.drawPage(pdfPageEmbed, {
+              x: inchToPoints(xIn),
+              y: inchToPoints(yIn),
+              width: inchToPoints(logoWidthIn),
+              height: inchToPoints(logoHeightIn),
+            });
+          }
+
+          placedCount++;
+          xIn += logoWidthIn + GAP_IN;
+        }
+
+        // move down for next row
+        yIn -= logoHeightIn + GAP_IN;
+        if (s * logosPerSheet + placedCount >= totalQty) break;
       }
     }
 
-    const mergedPdfBytes = await pdfDoc.save();
-
-    // Clean up uploaded file
-    fs.unlinkSync(filePath);
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename=gangsheet.pdf');
-    res.send(Buffer.from(mergedPdfBytes));
-
-  } catch (error) {
-    console.error('❌ Error merging file:', error);
-    res.status(500).send('Error generating gang sheet');
+    // Save final gang sheet PDF
+    const finalPdfBytes = await doc.save();
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=gangsheet.pdf"
+    );
+    res.send(Buffer.from(finalPdfBytes));
+  } catch (err) {
+    console.error("Error generating gang sheet:", err);
+    res.status(500).json({ error: "Failed to generate gang sheet" });
   }
 });
 
-// ✅ Use Railway's dynamic port
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+// Root test
+app.get("/", (req, res) => {
+  res.send("✅ Gang Sheet backend is running!");
+});
+
+app.listen(port, () => {
+  console.log(`✅ Server running on port ${port}`);
 });
