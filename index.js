@@ -12,116 +12,68 @@ const SAFE_MARGIN_INCH = 0.125;
 const SPACING_INCH = 0.5;
 const POINTS_PER_INCH = 72;
 
-app.get("/", (req, res) => {
-  res.send("✅ Gang Sheet backend (original Replit version) is running!");
-});
+app.use(express.static("public"));
 
-app.post("/merge", upload.single("file"), async (req, res) => {
+app.post("/generate", upload.array("images"), async (req, res) => {
   try {
-    const qty = parseInt(req.query.qty || "10");
-    const rotateAngle = parseInt(req.query.rotate || "0"); // 0 or 90
-    const uploadedFile = req.file.buffer;
-    const filename = req.file.originalname.toLowerCase();
+    const files = req.files;
+    const quantities = JSON.parse(req.body.quantities || "[]");
+    const rotations = JSON.parse(req.body.rotations || "[]");
 
-    const gangDoc = await PDFDocument.create();
-    const sheetWidthPts = SHEET_WIDTH_INCH * POINTS_PER_INCH;
-    const sheetHeightPts = SHEET_HEIGHT_INCH * POINTS_PER_INCH;
-    const gangPage = gangDoc.addPage([sheetWidthPts, sheetHeightPts]);
+    const pdfDoc = await PDFDocument.create();
+    const sheetWidth = SHEET_WIDTH_INCH * POINTS_PER_INCH;
+    const sheetHeight = SHEET_HEIGHT_INCH * POINTS_PER_INCH;
 
-    let embeddedObj;
-    let originalWidthPts;
-    let originalHeightPts;
-    let isPDF = false;
+    let page = pdfDoc.addPage([sheetWidth, sheetHeight]);
 
-    if (filename.endsWith(".pdf")) {
-      const srcDoc = await PDFDocument.load(uploadedFile);
-      [embeddedObj] = await gangDoc.embedPdf(await srcDoc.save());
-      originalWidthPts = embeddedObj.width;
-      originalHeightPts = embeddedObj.height;
-      isPDF = true;
-    } else if (filename.endsWith(".png")) {
-      const embeddedPng = await gangDoc.embedPng(uploadedFile);
-      originalWidthPts = embeddedPng.width;   // <-- this is the scaling bug
-      originalHeightPts = embeddedPng.height;
-      embeddedObj = embeddedPng;
-    } else {
-      throw new Error("Unsupported file type. Upload PDF or PNG.");
-    }
+    let x = SAFE_MARGIN_INCH * POINTS_PER_INCH;
+    let y = sheetHeight - SAFE_MARGIN_INCH * POINTS_PER_INCH;
 
-    // ✅ Swap width/height when rotated
-    const isRotated = rotateAngle === 90 || rotateAngle === 270;
-    const logoWidthPts = isRotated ? originalHeightPts : originalWidthPts;
-    const logoHeightPts = isRotated ? originalWidthPts : originalHeightPts;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const quantity = quantities[i] || 1;
+      const rotation = rotations[i] || 0;
 
-    const marginPts = SAFE_MARGIN_INCH * POINTS_PER_INCH;
-    const spacingPts = SPACING_INCH * POINTS_PER_INCH;
+      const imgBytes = file.buffer;
+      const img = await pdfDoc.embedPng(imgBytes);
 
-    const usableWidth = sheetWidthPts - marginPts * 2;
-    const usableHeight = sheetHeightPts - marginPts * 2;
+      const imgWidth = img.width;
+      const imgHeight = img.height;
 
-    const perRow = Math.floor((usableWidth + spacingPts) / (logoWidthPts + spacingPts));
-    const perCol = Math.floor((usableHeight + spacingPts) / (logoHeightPts + spacingPts));
-
-    console.log(`🧠 Can fit ${perRow} logos across × ${perCol} down`);
-
-    let placed = 0;
-
-    for (let row = 0; row < perCol && placed < qty; row++) {
-      for (let col = 0; col < perRow && placed < qty; col++) {
-        const baseX = marginPts + col * (logoWidthPts + spacingPts);
-        const baseY = sheetHeightPts - marginPts - (row + 1) * logoHeightPts - row * spacingPts;
-
-        if (rotateAngle === 90) {
-          if (isPDF) {
-            gangPage.drawPage(embeddedObj, {
-              x: baseX + logoWidthPts,
-              y: baseY,
-              width: originalWidthPts,
-              height: originalHeightPts,
-              rotate: degrees(90)
-            });
-          } else {
-            gangPage.drawImage(embeddedObj, {
-              x: baseX + logoWidthPts,
-              y: baseY,
-              width: originalWidthPts,
-              height: originalHeightPts,
-              rotate: degrees(90)
-            });
-          }
-        } else {
-          if (isPDF) {
-            gangPage.drawPage(embeddedObj, {
-              x: baseX,
-              y: baseY,
-              width: originalWidthPts,
-              height: originalHeightPts
-            });
-          } else {
-            gangPage.drawImage(embeddedObj, {
-              x: baseX,
-              y: baseY,
-              width: originalWidthPts,
-              height: originalHeightPts
-            });
-          }
+      for (let q = 0; q < quantity; q++) {
+        if (x + imgWidth + SAFE_MARGIN_INCH * POINTS_PER_INCH > sheetWidth) {
+          x = SAFE_MARGIN_INCH * POINTS_PER_INCH;
+          y -= imgHeight + SPACING_INCH * POINTS_PER_INCH;
         }
 
-        placed++;
+        if (y - imgHeight - SAFE_MARGIN_INCH * POINTS_PER_INCH < 0) {
+          page = pdfDoc.addPage([sheetWidth, sheetHeight]);
+          x = SAFE_MARGIN_INCH * POINTS_PER_INCH;
+          y = sheetHeight - SAFE_MARGIN_INCH * POINTS_PER_INCH;
+        }
+
+        page.drawImage(img, {
+          x,
+          y: y - imgHeight,
+          width: imgWidth,
+          height: imgHeight,
+          rotate: degrees(rotation),
+        });
+
+        x += imgWidth + SPACING_INCH * POINTS_PER_INCH;
       }
     }
 
-    console.log(`✅ Placed ${placed} logos`);
-
-    const finalPDF = await gangDoc.save();
+    const pdfBytes = await pdfDoc.save();
     res.setHeader("Content-Type", "application/pdf");
-    res.send(finalPDF);
+    res.setHeader("Content-Disposition", "attachment; filename=gangsheet.pdf");
+    res.send(pdfBytes);
 
   } catch (err) {
-    console.error("❌ MERGE ERROR:", err);
-    res.status(500).send("❌ Error merging file");
+    console.error(err);
+    res.status(500).send("Something went wrong");
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
